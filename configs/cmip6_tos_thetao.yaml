@@ -1,0 +1,71 @@
+# CMIP6 daily SST (tos, Oday) and monthly potential temperature (thetao, Omon)
+# for the model / scenario selection table.
+#
+# Usage:
+#   python3 esgf_download.py configs/cmip6_tos_thetao.yaml --dest /path/to/data --dry-run
+#   python3 esgf_download.py configs/cmip6_tos_thetao.yaml --dest /path/to/data
+
+project: CMIP6
+
+# Download directory. Leave empty and pass --dest on the command line
+# (--dest always wins).
+dest:
+
+# If a model provides several grids, take the first one available here
+# (gn = native ocean grid, gr* = regridded by the modelling centre).
+grid_preference: [gn, gr, gr1, gr2, gr3]
+
+# Where the files go, relative to dest. Available fields: project, source_id,
+# member_id, experiment_id, variable_id, table_id, grid_label, version, filename
+layout: "{variable_id}_{table_id}/{source_id}/{experiment_id}/{filename}"
+
+workers: 4  # parallel downloads
+
+# Data nodes tried first when a file has several replicas (close to Bern).
+preferred_data_nodes:
+  - esgf3.dkrz.de
+  - esgf.ceda.ac.uk
+  - vesg.ipsl.upmc.fr
+  - esg1.umr-cnrm.fr
+  - esgf-node2.cmcc.it
+  - esg-dn1.nsc.liu.se
+  - noresg.nird.sigma2.no
+
+# Searched in turn and merged (they federate different sets of data nodes).
+index_nodes:
+  - https://esgf-data.dkrz.de/esg-search/search
+  - https://esgf.ceda.ac.uk/esg-search/search
+  - https://esgf-node.ornl.gov/esgf-1-5-bridge
+
+# Variables downloaded for every simulation below. A simulation can carry its
+# own 'variables:' list to override this.
+variables:
+  - {variable_id: tos,    table_id: Oday}  # sea surface temperature, daily [degC]
+  - {variable_id: thetao, table_id: Omon}  # sea water potential temperature, monthly [degC]
+
+# Experiment sets, reused via YAML anchors.
+experiment_sets:
+  scen: &scen [ssp245, ssp370]
+  all:  &all  [historical, ssp126, ssp245, ssp370, ssp585]
+
+# member_id can also be a list, e.g. [r1i1p1f1, r2i1p1f1].
+simulations:
+  - {source_id: ACCESS-CM2,       member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: ACCESS-ESM1-5,    member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: BCC-CSM2-MR,      member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: CESM2,            member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: CESM2-WACCM,      member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: CMCC-CM2-SR5,     member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: CMCC-ESM2,        member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: MIROC6,           member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: MPI-ESM1-2-HR,    member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: MPI-ESM1-2-LR,    member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: NorESM2-LM,       member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: NorESM2-MM,       member_id: r1i1p1f1, experiments: *scen}
+  - {source_id: UKESM1-0-LL,      member_id: r1i1p1f2, experiments: *scen}
+  - {source_id: CNRM-CM6-1-HR,    member_id: r1i1p1f2, experiments: *all}
+  - {source_id: CNRM-ESM2-1,      member_id: r1i1p1f2, experiments: *all}
+  - {source_id: EC-Earth3-Veg,    member_id: r1i1p1f1, experiments: *all}
+  - {source_id: EC-Earth3-Veg-LR, member_id: r1i1p1f1, experiments: *all}  # ssp126/ssp585 possibly not on ESGF
+  - {source_id: GFDL-ESM4,        member_id: r1i1p1f1, experiments: *all}
+  - {source_id: IPSL-CM6A-LR,     member_id: r1i1p1f1, experiments: *all}

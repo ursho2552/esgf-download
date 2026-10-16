@@ -1,0 +1,45 @@
+# CMIP7 example: monthly near-surface air temperature and SST of one model.
+#
+# As of October 2026 ESGF lists only a few CMIP7 test datasets (these two),
+# and their files are not yet searchable, so this config currently reports
+# both as missing. It shows the CMIP7 facets; extend it once data appears.
+#
+# Usage:
+#   python3 esgf_download.py configs/cmip7_example.yaml --dest /path/to/data --dry-run
+
+project: CMIP7
+
+dest:
+
+# CMIP7 grid labels look like g102, g114 (not gn/gr). If a model provides a
+# variable on several grids, list the ones you prefer here; otherwise the
+# newest version on any grid is taken.
+grid_preference: []
+
+# The CMIP6 default layout uses table_id, which CMIP7 does not have. Any
+# facet or field of the ESGF file record can be used, e.g. {institution_id},
+# {variant_label}, {region}, {variable_branding_suffix}.
+layout: "{variable_id}_{frequency}/{source_id}/{experiment_id}/{filename}"
+
+workers: 4
+
+# The ORNL bridge (https://esgf-node.ornl.gov/esgf-1-5-bridge), which lists
+# the US and Japanese copies, has no CMIP7 data yet and rejects the
+# variable_branding_suffix facet (HTTP 422). Add it back once it serves CMIP7.
+index_nodes:
+  - https://esgf-data.dkrz.de/esg-search/search
+  - https://esgf.ceda.ac.uk/esg-search/search
+
+# In CMIP7 a variable is identified by variable_id + frequency + region +
+# branding suffix (which encodes the time sampling, vertical level, spatial
+# shape and area type, e.g. tavg-h2m-hxy-u = time mean, at 2 m height,
+# horizontal field, unmasked). A facet left out matches all of its values;
+# each match is downloaded as its own dataset.
+variables:
+  - {variable_id: tas, frequency: mon, region: glb, variable_branding_suffix: tavg-h2m-hxy-u}
+  - {variable_id: tos, frequency: mon, region: glb, variable_branding_suffix: tavg-u-hxy-sea}
+
+# CMIP7 uses variant_label where CMIP6 had member_id. Like any facet it can
+# be a list, e.g. [r1i1p1f1, r2i1p1f1].
+simulations:
+  - {source_id: EC-Earth3-ESM-1-1, variant_label: r1i1p1f1, experiments: [esm-scen7-vl]}
