@@ -1,0 +1,48 @@
+# CMIP7 monthly near-surface air temperature (tas) and daily SST (tos) of the
+# emission-driven historical and scenario runs, one member per model.
+#
+# Models and members were chosen from what was on ESGF on 2026-11-10 (see
+# configs/cmip7_search_tas_tos.yaml to list what is available now): per model
+# the member that covers most experiments. Combinations not (yet) published
+# are listed in missing.csv; re-running later picks them up.
+#
+# Usage:
+#   python3 esgf_download.py configs/cmip7_tas_tos.yaml --dest /path/to/data --dry-run
+#   python3 esgf_download.py configs/cmip7_tas_tos.yaml --dest /path/to/data
+
+project: CMIP7   # searched on the ESGF-NG STAC indices (East and West)
+
+# Download directory. Leave empty and pass --dest on the command line
+# (--dest always wins).
+dest:
+
+# CMIP7 grid labels (g102, g147, ...) are model specific; so far every model
+# publishes these variables on one grid only.
+grid_preference: []
+
+# Where the files go, relative to dest. Any facet or field of the ESGF record
+# can be used, e.g. {institution_id}, {variant_label}, {grid_label}, {version}.
+layout: "{variable_id}_{frequency}/{source_id}/{experiment_id}/{filename}"
+
+workers: 4  # parallel downloads
+
+# In CMIP7 a variable is variable_id + frequency + region + branding suffix
+# (tavg-h2m-hxy-u: time mean, 2 m height, horizontal field, unmasked;
+#  tavg-u-hxy-sea: time mean, horizontal field over sea).
+variables:
+  - {variable_id: tas, frequency: mon, region: glb, variable_branding_suffix: tavg-h2m-hxy-u}  # [K]
+  - {variable_id: tos, frequency: day, region: glb, variable_branding_suffix: tavg-u-hxy-sea}  # [degC]
+
+experiment_sets:
+  # emission-driven historical and scenarios published so far (scen7-l, -ml,
+  # -hl and -ln not yet on ESGF)
+  esm: &esm [esm-hist, esm-scen7-vl, esm-scen7-m, esm-scen7-h]
+
+# variant_label can also be a list, e.g. [r1i1p1f1, r2i1p1f1].
+simulations:
+  - {source_id: CanESM5-1,         variant_label: r1i1p2f1, experiments: *esm}  # only p2 published
+  - {source_id: CanESM6-0-MR,      variant_label: r1i1p1f1, experiments: *esm}
+  - {source_id: EC-Earth3-ESM-1-1, variant_label: r1i1p1f1, experiments: *esm}  # no esm-scen7-m yet
+  - {source_id: UKESM1-3-LL,       variant_label: r1i1p1f1, experiments: *esm}  # no daily tos
+  - {source_id: ACCESS-ESM1-6,     variant_label: r1i1p1f1, experiments: *esm}  # esm-hist only so far
+  - {source_id: CNRM-ESM2-1e,      variant_label: r6i1p1f1, experiments: *esm}  # esm-hist tos only so far

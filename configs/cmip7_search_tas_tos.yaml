@@ -1,0 +1,25 @@
+# What CMIP7 tas and tos exists for the historical and scenario experiments?
+# For searching, not for downloading: no source_id or variant_label is given,
+# so all models and all members match.
+#
+# Usage:
+#   python3 esgf_download.py configs/cmip7_search_tas_tos.yaml --available --dest /path/to/log_dir
+#
+# writes available.csv (one line per dataset) and available_summary.csv (number
+# of members per variable, model and experiment) and prints the summary.
+
+project: CMIP7   # searched on the ESGF-NG STAC indices (East and West)
+
+variables:
+  - {variable_id: tas, frequency: [mon, day], region: glb, variable_branding_suffix: tavg-h2m-hxy-u}
+  - {variable_id: tos, frequency: [mon, day], region: glb, variable_branding_suffix: tavg-u-hxy-sea}
+
+experiment_sets:
+  # concentration-driven (historical + scen7) and emission-driven (esm-*)
+  conc: &conc [historical, scen7-vl, scen7-l, scen7-ml, scen7-m, scen7-h, scen7-hl, scen7-ln]
+  emis: &emis [esm-hist, esm-scen7-vl, esm-scen7-l, esm-scen7-ml, esm-scen7-m, esm-scen7-h,
+               esm-scen7-hl, esm-scen7-ln]
+
+simulations:
+  - {experiments: *conc}
+  - {experiments: *emis}

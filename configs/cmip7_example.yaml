@@ -1,13 +1,11 @@
-# CMIP7 example: monthly near-surface air temperature and SST of one model.
-#
-# As of October 2026 ESGF lists only a few CMIP7 test datasets (these two),
-# and their files are not yet searchable, so this config currently reports
-# both as missing. It shows the CMIP7 facets; extend it once data appears.
+# CMIP7 example: monthly near-surface air temperature and SST of one model
+# and experiment (about 0.45 GB). See cmip7_tas_tos.yaml for a full config and
+# cmip7_search_tas_tos.yaml for listing what is available.
 #
 # Usage:
 #   python3 esgf_download.py configs/cmip7_example.yaml --dest /path/to/data --dry-run
 
-project: CMIP7
+project: CMIP7   # searched on the ESGF-NG STAC indices (East and West)
 
 dest:
 
@@ -22,13 +20,6 @@ grid_preference: []
 layout: "{variable_id}_{frequency}/{source_id}/{experiment_id}/{filename}"
 
 workers: 4
-
-# The ORNL bridge (https://esgf-node.ornl.gov/esgf-1-5-bridge), which lists
-# the US and Japanese copies, has no CMIP7 data yet and rejects the
-# variable_branding_suffix facet (HTTP 422). Add it back once it serves CMIP7.
-index_nodes:
-  - https://esgf-data.dkrz.de/esg-search/search
-  - https://esgf.ceda.ac.uk/esg-search/search
 
 # In CMIP7 a variable is identified by variable_id + frequency + region +
 # branding suffix (which encodes the time sampling, vertical level, spatial

@@ -20,9 +20,13 @@ and the CMIP7 equivalent like
     simulations:
       - {source_id: EC-Earth3-ESM-1-1, variant_label: r1i1p1f1, experiments: [esm-scen7-vl]}
 
+A simulation without source_id (or member) matches all models (members); with
+--available such a config lists what exists instead of downloading it.
+
 Workflow
-  1. Query several ESGF index nodes (file-level search, latest versions only,
-     retracted files dropped) and merge all replicas of each file.
+  1. Query several ESGF index nodes (latest versions only, retracted files
+     dropped) and merge all replicas of each file. CMIP6 is searched on the
+     legacy ESGF search, CMIP7 on the STAC indices of ESGF-NG.
   2. Per simulation, experiment and variable keep one grid (by
      grid_preference) and the newest dataset version.
   3. Download each file from the first data node that works (preferred nodes
@@ -38,6 +42,10 @@ Files written to the download directory
   missing.csv       requested combinations not found on ESGF
   search_errors.csv index node queries that failed (results may lack replicas)
   failed.csv        files that could not be downloaded in the last run
+and with --available instead
+  available.csv                one line per dataset found (all grids and matches)
+  available_summary.csv        number of members per variable, model and experiment
+  available_search_errors.csv  index node queries that failed
 
 Only the Python standard library is needed for JSON configs; YAML configs need
 PyYAML (available in the usual Python modules, e.g. `module load Python`).
@@ -47,6 +55,7 @@ Examples
   python3 esgf_download.py configs/cmip6_tos_thetao.yaml --dest /path/to/data
   python3 esgf_download.py configs/cmip6_tos_thetao.yaml --dest /path/to/data \\
       --models GFDL-ESM4 --variables tos --experiments ssp245
+  python3 esgf_download.py configs/cmip7_search_tas_tos.yaml --available --dest /path/to/logs
 """
 
 import argparse
@@ -64,17 +73,28 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Search endpoints. Two kinds are supported, told apart by their URL:
+#  - the legacy ESGF search (esg-search and the ORNL bridge), which holds
+#    CMIP6 and earlier. The nodes federate different subsets of the data
+#    nodes (e.g. US originals only show up via the ORNL bridge), so the
+#    results of all of them are merged.
+#  - the STAC discovery API of ESGF-NG, which holds CMIP7 (and copies of
+#    CMIP6). East and West run different backends; both are merged too.
+LEGACY_INDEX_NODES = [
+    "https://esgf-data.dkrz.de/esg-search/search",
+    "https://esgf.ceda.ac.uk/esg-search/search",
+    "https://esgf-node.ornl.gov/esgf-1-5-bridge",
+]
+STAC_INDEX_NODES = [
+    "https://discovery.east.esgf.io",
+    "https://discovery.west.esgf.io",
+]
+# Default index_nodes per project; other projects use the legacy nodes.
+DEFAULT_INDEX_NODES = {"CMIP7": STAC_INDEX_NODES}
+
 # Defaults, all of which can be overridden in the config file.
 DEFAULTS = {
     "project": "CMIP6",
-    # Legacy-API compatible search endpoints. They federate different subsets
-    # of the data nodes (e.g. US originals only show up via the ORNL bridge),
-    # so the results of all of them are merged.
-    "index_nodes": [
-        "https://esgf-data.dkrz.de/esg-search/search",
-        "https://esgf.ceda.ac.uk/esg-search/search",
-        "https://esgf-node.ornl.gov/esgf-1-5-bridge",
-    ],
     # Data nodes tried first; all other replicas follow in random order.
     "preferred_data_nodes": [],
     "grid_preference": ["gn", "gr", "gr1", "gr2", "gr3"],
@@ -121,14 +141,18 @@ def load_config(path):
     for key in ("variables", "simulations"):
         if not cfg.get(key):
             sys.exit(f"config {path}: '{key}' is missing or empty")
+    # A simulation without source_id (or member) matches all models (members),
+    # e.g. to see with --available what exists for some experiments.
     for s in cfg["simulations"]:
-        if not isinstance(s, dict) or not {"source_id", "experiments"} <= set(s):
-            sys.exit(f"config {path}: each simulation needs source_id and experiments, got {s}")
+        if not isinstance(s, dict) or "experiments" not in s:
+            sys.exit(f"config {path}: each simulation needs experiments, got {s}")
     for v in [v for s in cfg["simulations"] for v in s.get("variables", [])] + cfg["variables"]:
         if not isinstance(v, dict) or "variable_id" not in v:
             sys.exit(f"config {path}: each variable needs a variable_id, got {v}")
 
-    return {**DEFAULTS, **cfg}
+    cfg = {**DEFAULTS, **cfg}
+    cfg.setdefault("index_nodes", DEFAULT_INDEX_NODES.get(cfg["project"], LEGACY_INDEX_NODES))
+    return cfg
 
 
 # Keys of a simulation entry that are not search facets.
@@ -162,6 +186,8 @@ def build_requests(cfg, models=None, experiments=None, variables=None):
         if not exps:
             continue
         sim_facets = {k: v for k, v in sim.items() if k not in SIMULATION_KEYS}
+        if models and "source_id" not in sim_facets:
+            sim_facets = {"source_id": list(models), **sim_facets}
         for sf in expand(sim_facets):
             if models and sf["source_id"] not in models:
                 continue
@@ -176,15 +202,47 @@ def build_requests(cfg, models=None, experiments=None, variables=None):
 # --------------------------------------------------------------------------
 # Search
 # --------------------------------------------------------------------------
-def search_files(index_url, facets, experiments):
-    """Return all file records (all replicas) for the facets on one index node."""
+def is_stac(index_url):
+    """True for an ESGF-NG STAC discovery API, False for the legacy search."""
+    return "esg-search" not in index_url and "esgf-1-5-bridge" not in index_url
+
+
+def search_files(index_url, project, facets, experiments):
+    """Return all file records (all replicas) for the facets on one index node.
+
+    Records are in the form of the legacy search; STAC results are converted.
+    """
+    search = search_stac if is_stac(index_url) else search_legacy
     # One query per experiment: esg-search OR-s repeated facet values, but the
     # ORNL bridge silently keeps only the last one.
-    return [d for e in experiments for d in search_experiment(index_url, facets, e)]
+    return [d for e in experiments for d in search(index_url, project, facets, e)]
 
 
-def search_experiment(index_url, facets, experiment):
-    params = [("type", "File"), ("latest", "true"), ("format", "application/solr+json")]
+def get_json(url, index_url, body=None):
+    """GET url (or POST body as JSON) and return the decoded response, with retries."""
+    headers = {"User-Agent": USER_AGENT}
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers=headers)
+    for attempt in range(SEARCH_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as r:
+                return json.load(r)
+        except Exception as e:  # noqa: BLE001 (network errors come in many types)
+            # A rejected query (e.g. a facet the node does not support)
+            # would fail the same way again.
+            rejected = (isinstance(e, urllib.error.HTTPError) and 400 <= e.code < 500
+                        and e.code not in (408, 429))
+            if rejected or attempt == SEARCH_ATTEMPTS - 1:
+                raise RuntimeError(f"search failed on {index_url}: {e}") from e
+            time.sleep(15 * 2 ** attempt)
+
+
+def search_legacy(index_url, project, facets, experiment):
+    params = [("type", "File"), ("latest", "true"), ("format", "application/solr+json"),
+              ("project", project)]
     params += list(facets.items())
     params.append(("experiment_id", experiment))
     if "esg-search" in index_url:
@@ -193,24 +251,79 @@ def search_experiment(index_url, facets, experiment):
     docs, offset, limit = [], 0, 1000
     while True:
         query = urllib.parse.urlencode(params + [("limit", limit), ("offset", offset)])
-        req = urllib.request.Request(f"{index_url}?{query}", headers={"User-Agent": USER_AGENT})
-        for attempt in range(SEARCH_ATTEMPTS):
-            try:
-                with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as r:
-                    resp = json.load(r)["response"]
-                break
-            except Exception as e:  # noqa: BLE001 (network errors come in many types)
-                # A rejected query (e.g. a facet the node does not support)
-                # would fail the same way again.
-                rejected = (isinstance(e, urllib.error.HTTPError) and 400 <= e.code < 500
-                            and e.code not in (408, 429))
-                if rejected or attempt == SEARCH_ATTEMPTS - 1:
-                    raise RuntimeError(f"search failed on {index_url}: {e}") from e
-                time.sleep(15 * 2 ** attempt)
+        resp = get_json(f"{index_url}?{query}", index_url)["response"]
         docs += resp["docs"]
         offset += len(resp["docs"])
         if not resp["docs"] or offset >= resp["numFound"]:
             return docs
+
+
+# Collection ids per STAC index node (their case differs: CMIP7 vs cmip7).
+STAC_COLLECTIONS = {}
+# Multihash prefixes (hash function code + digest length) of ESGF-NG checksums.
+MULTIHASH = {"1220": "SHA256", "1340": "SHA512", "d50110": "MD5"}
+
+
+def stac_collection(index_url, project):
+    if index_url not in STAC_COLLECTIONS:
+        resp = get_json(f"{index_url}/collections", index_url)
+        STAC_COLLECTIONS[index_url] = [c["id"] for c in resp["collections"]]
+    for c in STAC_COLLECTIONS[index_url]:
+        if c.lower() == project.lower():
+            return c
+    raise RuntimeError(f"search failed on {index_url}: no collection {project}")
+
+
+def search_stac(index_url, project, facets, experiment):
+    # Facets are item properties prefixed with the project (cmip7:source_id).
+    # Only POST /search with a CQL2-JSON filter works on both East and West
+    # (West ignores the filter of GET /items).
+    prefix = project.lower() + ":"
+    conds = [{"op": "=", "args": [{"property": "latest"}, True]}]
+    conds += [{"op": "=", "args": [{"property": prefix + k}, v]}
+              for k, v in {**facets, "experiment_id": experiment}.items()]
+    body = {"collections": [stac_collection(index_url, project)], "limit": 100,
+            "filter-lang": "cql2-json", "filter": {"op": "and", "args": conds}}
+    url, docs = f"{index_url}/search", []
+    while url:
+        resp = get_json(url, index_url, body)
+        for item in resp["features"]:
+            docs += stac_files(item, prefix)
+        nxt = next((ln for ln in resp.get("links", []) if ln.get("rel") == "next"), None)
+        if not resp["features"] or not nxt:
+            return docs
+        url = nxt["href"]
+        body = nxt.get("body") if nxt.get("method", "GET").upper() == "POST" else None
+    return docs
+
+
+def stac_files(item, prefix):
+    """Legacy-style file records of a STAC item (one dataset on one data node)."""
+    props = item["properties"]
+    fields = {k.removeprefix(prefix): v for k, v in props.items()}
+    docs = []
+    for asset in item["assets"].values():
+        # data files only, and only plain HTTP(S) (not Globus web links)
+        if asset.get("protocol") not in ("http", "https") or "data" not in asset.get("roles", []):
+            continue
+        href = asset["href"]
+        node = asset.get("alternate:name") or urllib.parse.urlparse(href).netloc
+        checksum, ctype = asset.get("file:checksum"), None
+        for code, name in MULTIHASH.items():
+            if checksum and checksum.startswith(code):
+                checksum, ctype = checksum[len(code):], name
+                break
+        docs.append({
+            **fields,
+            "title": os.path.basename(urllib.parse.urlparse(href).path),
+            "dataset_id": f"{item['id']}|{node}",
+            "data_node": node,
+            "size": asset.get("file:size", 0),
+            "checksum": checksum if ctype else None,
+            "checksum_type": ctype,
+            "url": [f"{href}|application/netcdf|HTTPServer"],
+        })
+    return docs
 
 
 def http_urls(doc):
@@ -225,11 +338,11 @@ def collect(cfg, sim, experiments, var, index_nodes, out):
     dataset is the dataset id without grid and version. Returns
     {index_node: error} for the index nodes whose search failed.
     """
-    facets = {"project": cfg["project"], **sim, **var}
+    facets = {**sim, **var}
     errors = {}
     for idx in index_nodes:
         try:
-            docs = search_files(idx, facets, experiments)
+            docs = search_files(idx, cfg["project"], facets, experiments)
         except RuntimeError as e:
             errors[idx] = str(e)
             continue
@@ -382,6 +495,89 @@ def download_one(job, preferred_nodes, verify_existing):
     return "failed", target, last_err
 
 
+# How datasets are described in available.csv and its summary, per project:
+# identifying columns (taken from the file records), the ensemble member
+# column, and the columns that together name a variable.
+AVAILABLE = {
+    "CMIP6": {
+        "columns": ["activity_id", "institution_id", "source_id", "experiment_id", "member_id",
+                    "table_id", "variable_id", "grid_label", "nominal_resolution"],
+        "member": "member_id",
+        "variable": ["variable_id", "table_id"],
+    },
+    "CMIP7": {
+        "columns": ["activity_id", "institution_id", "source_id", "experiment_id", "variant_label",
+                    "frequency", "region", "variable_id", "variable_branding_suffix", "grid_label",
+                    "nominal_resolution"],
+        "member": "variant_label",
+        "variable": ["variable_id", "variable_branding_suffix", "frequency", "region"],
+    },
+}
+
+
+def report_available(cfg, results, dest):
+    """Write every dataset found (not only the selected ones) and a summary.
+
+    available.csv          one line per dataset: facets, version, files, size, data nodes
+    available_summary.csv  number of members per variable, model and experiment
+    """
+    spec = AVAILABLE.get(cfg["project"])
+    if spec is None:  # other projects: the facets of the config
+        facets = list(dict.fromkeys(k for sim, _, var, _, _ in results for k in {**sim, **var}))
+        spec = {"columns": facets + ["experiment_id", "grid_label"], "member": "member_id",
+                "variable": [k for k in facets if k != "source_id"]}
+    rows, seen = [], set()
+    for _, _, _, records, _ in results:
+        for (exp, dataset, grid, version), files in sorted(records.items()):
+            if (dataset, grid, version) in seen:
+                continue
+            seen.add((dataset, grid, version))
+            fields = {**next(iter(files.values()))["fields"], "experiment_id": exp,
+                      "grid_label": grid}
+            nodes = sorted({n for f in files.values() for n in f["urls"].values()})
+            rows.append([fields.get(c, "") for c in spec["columns"]] + [
+                version, len(files), sum(f["size"] for f in files.values()), ";".join(nodes)])
+    cols = spec["columns"] + ["version", "n_files", "size_bytes", "data_nodes"]
+    write_csv(os.path.join(dest, "available.csv"), cols, rows)
+
+    # summary: members per (variable, model) and experiment, experiments in config order
+    ci = {c: i for i, c in enumerate(cols)}
+    exps = list(dict.fromkeys(e for _, es, _, _, _ in results for e in es))
+    members = defaultdict(set)
+    size = defaultdict(int)
+    mi = ci.get(spec["member"])
+    for r in rows:
+        var = "/".join(str(r[ci[c]]) for c in spec["variable"] if c in ci)
+        # without a member column, count datasets
+        members[(var, r[ci["source_id"]], r[ci["experiment_id"]])].add(
+            r[mi] if mi is not None else tuple(r))
+        size[var] += r[ci["size_bytes"]]
+    pairs = sorted({k[:2] for k in members})
+    summary = [[v, m] + [len(members.get((v, m, e), ())) for e in exps] for v, m in pairs]
+    write_csv(os.path.join(dest, "available_summary.csv"), ["variable", "source_id"] + exps, summary)
+
+    log(f"{len(rows)} datasets of {len({m for _, m in pairs})} models available; "
+        f"number of members per variable, model and experiment ('-' = none):")
+    # experiments without any data are named once instead of shown as empty columns
+    shown = [i for i, e in enumerate(exps) if any(r[2 + i] for r in summary)]
+    width = max([len("source_id")] + [len(m) for _, m in pairs])
+    for var in sorted({v for v, _ in pairs}):
+        print(f"\n{var}  ({human(size[var])} for all members)")
+        print("  " + "source_id".ljust(width)
+              + "".join(f"  {exps[i]:>{max(len(exps[i]), 3)}}" for i in shown))
+        for v, m, *counts in summary:
+            if v == var:
+                print("  " + m.ljust(width) + "".join(
+                    f"  {(str(counts[i]) if counts[i] else '-'):>{max(len(exps[i]), 3)}}"
+                    for i in shown))
+    empty = [e for i, e in enumerate(exps) if i not in shown]
+    if empty:
+        print(f"\nnothing available for: {', '.join(empty)}")
+    print(flush=True)
+    log(f"see {os.path.join(dest, 'available.csv')} and "
+        f"{os.path.join(dest, 'available_summary.csv')}")
+
+
 def human(nbytes):
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if nbytes < 1024 or unit == "TB":
@@ -402,6 +598,10 @@ def main():
     p.add_argument("config", help="YAML (.yaml/.yml) or JSON config file")
     p.add_argument("--dest", help="download directory (overrides 'dest' in the config)")
     p.add_argument("--dry-run", action="store_true", help="only search and report files and sizes")
+    p.add_argument("--available", action="store_true",
+                   help="only search and list everything found (all grids, all matching "
+                        "datasets) in available.csv and available_summary.csv; download "
+                        "directory defaults to the current one")
     p.add_argument("--workers", type=int, help="parallel downloads (overrides the config, default 4)")
     p.add_argument("--models", nargs="+", help="only these source_ids from the config")
     p.add_argument("--experiments", nargs="+", help="only these experiment_ids from the config")
@@ -411,7 +611,7 @@ def main():
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    dest = args.dest or cfg.get("dest")
+    dest = args.dest or cfg.get("dest") or ("." if args.available else None)
     if not dest:
         sys.exit("no download directory: pass --dest or set 'dest' in the config")
     dest = os.path.abspath(os.path.expanduser(dest))
@@ -455,6 +655,16 @@ def main():
         for idx, e in still.items():
             log(f"WARNING {e}: {tag(sim, ' '.join(experiments), var)} may miss replicas")
             search_errors.append(row(sim, " ".join(experiments), var) + [idx, e])
+    errors_header = sim_cols + ["experiments"] + var_cols + ["index_node", "error"]
+
+    if args.available:
+        # separate files, so that a download directory's manifest stays untouched
+        write_csv(os.path.join(dest, "available_search_errors.csv"), errors_header, search_errors)
+        report_available(cfg, results, dest)
+        if search_errors:
+            log(f"WARNING {len(search_errors)} searches failed, the list may be incomplete "
+                f"(see {os.path.join(dest, 'available_search_errors.csv')}; re-run to retry)")
+        return 0
 
     jobs, manifest, missing, paths = [], [], [], set()
     for sim, experiments, var, records, _ in results:
@@ -496,8 +706,7 @@ def main():
                   "n_replicas", "path"],
               manifest)
     write_csv(os.path.join(dest, "missing.csv"), sim_cols + ["experiment_id"] + var_cols, missing)
-    write_csv(os.path.join(dest, "search_errors.csv"),
-              sim_cols + ["experiments"] + var_cols + ["index_node", "error"], search_errors)
+    write_csv(os.path.join(dest, "search_errors.csv"), errors_header, search_errors)
 
     total = sum(j["info"]["size"] for j in jobs)
     log(f"{len(jobs)} files, {human(total)} in total; {len(missing)} combinations missing "

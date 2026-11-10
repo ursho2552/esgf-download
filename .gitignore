@@ -1,3 +1,24 @@
+# Python
 __pycache__/
 *.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Downloads, in case the repository is used as download directory
+*.nc
 *.part
+
+# Logs of download runs (e.g. nohup ... > download.log)
+*.log
+nohup.out
+
+# Files the script writes into the download directory (--available without
+# --dest writes into the current one)
+/manifest.csv
+/missing.csv
+/search_errors.csv
+/failed.csv
+/available.csv
+/available_summary.csv
+/available_search_errors.csv
